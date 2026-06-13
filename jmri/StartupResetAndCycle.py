@@ -61,18 +61,34 @@ class StartupResetAndCycle(jmri.jmrit.automat.AbstractAutomaton):
         return
 
     def handle(self):
-        self._reset_unknown_sensors()
-        self._cycle_all_turnouts()
+        # Wrap the whole run so any error is reported in the script output
+        # instead of the automaton dying silently.
+        try:
+            print "StartupResetAndCycle: starting (JMRI %s)." \
+                % jmri.Version.name()
+            self._reset_unknown_sensors()
+            self._cycle_all_turnouts()
+            print "StartupResetAndCycle: done."
+        except java.lang.Exception, e:
+            print "StartupResetAndCycle FAILED: %s" % e
         # Returning False means handle() runs exactly once, then the
         # automaton stops.  This is a one-shot startup task.
         return False
 
+    def _list_beans(self, manager):
+        # getNamedBeanSet() exists on modern JMRI; fall back for older.
+        try:
+            return list(manager.getNamedBeanSet())
+        except (AttributeError, TypeError):
+            names = manager.getSystemNameList()
+            return [manager.getBySystemName(n) for n in names]
+
     # --- Sensors ------------------------------------------------------------
 
     def _reset_unknown_sensors(self):
-        sensorList = sensors.getNamedBeanSet()
-        if sensorList is None or sensorList.isEmpty():
-            print "No sensors found; skipping sensor reset."
+        sensorList = self._list_beans(sensors)
+        if not sensorList:
+            print "No sensors in the Sensor Table; skipping sensor reset."
             return
 
         resetCount = 0
@@ -94,22 +110,16 @@ class StartupResetAndCycle(jmri.jmrit.automat.AbstractAutomaton):
     # --- Turnouts -----------------------------------------------------------
 
     def _cycle_all_turnouts(self):
-        turnoutList = turnouts.getNamedBeanSet()
-        if turnoutList is None or turnoutList.isEmpty():
-            print "No turnouts found; skipping turnout cycle."
+        turnoutList = self._list_beans(turnouts)
+        if not turnoutList:
+            print "No turnouts in the Turnout Table; skipping turnout cycle."
+            print "  -> Nothing will appear on the LocoNet monitor because"
+            print "     there are no turnouts defined for the script to drive."
             return
 
         # Snapshot the turnouts (and their pre-run state) once up front.
-        items = []
-        for turnout in turnoutList:
-            if turnout is None:
-                continue
-            items.append((turnout, turnout.getKnownState()))
-
+        items = [(t, t.getKnownState()) for t in turnoutList if t is not None]
         count = len(items)
-        if count == 0:
-            print "No turnouts found; skipping turnout cycle."
-            return
 
         # Phase 1: drive everything THROWN, then let the motors travel.
         print "Cycling %d turnout(s): commanding THROWN ..." % count
