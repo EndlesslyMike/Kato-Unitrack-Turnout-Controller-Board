@@ -4,30 +4,28 @@
 #
 # Layout assumptions:
 #   - All turnouts are slow-motion (stall-motor) machines on LocoNet.
-#   - There is no CDU / solenoid inrush concern, so turnouts may all be
-#     commanded to move at the same time.
+#   - No CDU / solenoid inrush concern, so turnouts may all move at once.
 #   - LocoNet is a slow bus (~16.6 kbps), so a small gap is left between
 #     successive command messages to avoid flooding it.
 #
 # What it does, in order:
-#   1. Resets every sensor that is currently UNKNOWN to INACTIVE, so the
-#      panel and signals start from a clean, defined state.
-#   2. Cycles every turnout: commands them all THROWN, waits for the
-#      slow-motion machines to finish travelling, commands them all CLOSED,
-#      waits again, then parks each in a known position (CLOSED by default).
-#      Cycling forces the layout hardware and JMRI's internal state into
-#      agreement and refreshes any signals / LED indicators that key off
-#      turnout position.
+#   1. Prints a short report (JMRI version, connections, turnout/sensor
+#      counts) so the Script Output window tells you what it is working with.
+#   2. Resets every sensor that is currently UNKNOWN to INACTIVE.
+#   3. Cycles every turnout: commands them all THROWN, waits for the
+#      slow-motion machines to travel, commands them all CLOSED, waits again,
+#      then parks each in a known position (CLOSED by default).
 #
 # The work runs inside an AbstractAutomaton so waitMsec() is safe -- never
 # sleep() on the main GUI/script thread or you will freeze JMRI.
 #
-# Usage:
-#   - Run manually from PanelPro/DecoderPro:  Scripts -> Run Script...
-#   - Or wire it in as an automatic startup action:
-#       Edit -> Preferences -> Start Up -> Add -> Run Script...
+# IMPORTANT: this cycles the turnouts that exist in JMRI's Turnout Table.  If
+# that table is empty, nothing is sent to LocoNet -- the script will say so in
+# the Script Output window (Scripts -> Script Output).
 #
-# Tunables are grouped at the top of the class.
+# Usage:
+#   - Manually:   Scripts -> Run Script...
+#   - At startup: Edit -> Preferences -> Start Up -> Add -> Run Script...
 
 import jmri
 import java
@@ -37,22 +35,20 @@ class StartupResetAndCycle(jmri.jmrit.automat.AbstractAutomaton):
 
     # ----- Tunables ---------------------------------------------------------
 
-    # Time to allow a slow-motion machine to complete its full travel, in
-    # milliseconds.  Stall motors typically take ~1.5-3 s end to end; pick a
-    # value comfortably longer than your slowest machine.
+    # Time to allow a slow-motion machine to complete its full travel (ms).
+    # Stall motors typically take ~1.5-3 s; set this longer than your slowest.
     TRAVEL_MS = 2500
 
-    # Small gap between successive LocoNet command messages, in milliseconds.
-    # Keeps a burst of throws from saturating the (slow) LocoNet bus.
+    # Small gap between successive LocoNet command messages (ms).  Keeps a
+    # burst of throws from saturating the (slow) LocoNet bus.
     LOCONET_GAP_MS = 100
 
     # Final resting state for every turnout after cycling.
     # Use jmri.Turnout.CLOSED or jmri.Turnout.THROWN.
     FINAL_STATE = jmri.Turnout.CLOSED
 
-    # If True, return each turnout to whatever state it was in before the
-    # script ran instead of forcing FINAL_STATE.  Turnouts that were UNKNOWN
-    # still end up at FINAL_STATE.
+    # If True, return each turnout to its pre-run state instead of FINAL_STATE.
+    # Turnouts that were UNKNOWN still end up at FINAL_STATE.
     RESTORE_PREVIOUS_STATE = False
 
     # ------------------------------------------------------------------------
@@ -61,19 +57,19 @@ class StartupResetAndCycle(jmri.jmrit.automat.AbstractAutomaton):
         return
 
     def handle(self):
-        # Wrap the whole run so any error is reported in the script output
-        # instead of the automaton dying silently.
+        # Wrap the whole run so any error is reported in the Script Output
+        # window instead of the automaton dying silently.
         try:
-            print "StartupResetAndCycle: starting (JMRI %s)." \
-                % jmri.Version.name()
+            self._report()
             self._reset_unknown_sensors()
             self._cycle_all_turnouts()
             print "StartupResetAndCycle: done."
         except java.lang.Exception, e:
             print "StartupResetAndCycle FAILED: %s" % e
-        # Returning False means handle() runs exactly once, then the
-        # automaton stops.  This is a one-shot startup task.
+        # Run handle() exactly once, then stop -- this is a one-shot task.
         return False
+
+    # --- Helpers ------------------------------------------------------------
 
     def _list_beans(self, manager):
         # getNamedBeanSet() exists on modern JMRI; fall back for older.
@@ -82,6 +78,15 @@ class StartupResetAndCycle(jmri.jmrit.automat.AbstractAutomaton):
         except (AttributeError, TypeError):
             names = manager.getSystemNameList()
             return [manager.getBySystemName(n) for n in names]
+
+    def _report(self):
+        print "===== StartupResetAndCycle (JMRI %s) =====" \
+            % jmri.Version.name()
+        for memo in jmri.InstanceManager.getList(jmri.SystemConnectionMemo):
+            print "  connection: %s  (prefix '%s')" % (
+                memo.getUserName(), memo.getSystemPrefix())
+        print "  turnouts in table: %d" % len(self._list_beans(turnouts))
+        print "  sensors in table:  %d" % len(self._list_beans(sensors))
 
     # --- Sensors ------------------------------------------------------------
 
@@ -115,6 +120,8 @@ class StartupResetAndCycle(jmri.jmrit.automat.AbstractAutomaton):
             print "No turnouts in the Turnout Table; skipping turnout cycle."
             print "  -> Nothing will appear on the LocoNet monitor because"
             print "     there are no turnouts defined for the script to drive."
+            print "     Add them via Tools -> Tables -> Turnouts (system"
+            print "     names on your LocoNet connection, e.g. LT1, LT2 ...)."
             return
 
         # Snapshot the turnouts (and their pre-run state) once up front.
@@ -142,8 +149,8 @@ class StartupResetAndCycle(jmri.jmrit.automat.AbstractAutomaton):
             self.waitMsec(self.LOCONET_GAP_MS)
 
     def _park(self, items):
-        # If parking everything CLOSED and we are not restoring previous
-        # state, phase 2 already left them CLOSED -- nothing more to send.
+        # If parking everything CLOSED and not restoring previous state,
+        # phase 2 already left them CLOSED -- nothing more to send.
         if self.FINAL_STATE == jmri.Turnout.CLOSED \
            and not self.RESTORE_PREVIOUS_STATE:
             return
